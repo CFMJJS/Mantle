@@ -11,10 +11,14 @@
 	  Command Bar widget   type a command and press Enter (pin it to keep it on screen)
 ]]
 
-local VERSION = "1.4.0"
+local VERSION = "1.5.1"
 
 -- Troubleshooting: set any of these to false to skip that feature while Mantle loads.
 local FEATURES = { Music = true, Background = true, NewCommands = true }
+
+-- Owner tag --------------------------------------------------------------------------
+-- Anyone with this username automatically gets a gold "Owner" tag (seen only by Mantle users).
+local OWNER_USERNAME = "malachiqx"
 
 --==================================================================================--
 --  SERVICES
@@ -55,6 +59,8 @@ local Env = {
 local HasFS = typeof(Env.writefile) == "function" and typeof(Env.readfile) == "function" and typeof(Env.isfile) == "function"
 local CONFIG_FILE = "Mantle/config.json"
 local StartClock = os.clock()
+-- Session statistics shown in Home > General Info
+local SessionStats = { Scripts = 0, Last = nil }
 
 --==================================================================================--
 --  CORE UTILITIES
@@ -216,6 +222,7 @@ local function DefaultWidgetConfig()
 		Home = { Enabled = false, Pinned = false },
 		Commands = { Enabled = false, Pinned = false },
 		Players = { Enabled = false, Pinned = false },
+		Misc = { Enabled = false, Pinned = false },
 		Credits = { Enabled = false, Pinned = false },
 		["Command Bar"] = { Enabled = true, Pinned = not touch },
 		["Command History"] = { Enabled = true, Pinned = false },
@@ -712,6 +719,10 @@ local function Execute(cmd)
 		local ok, err = pcall(cmd.Func, cmd, cmd.Values, target)
 		if ok then
 			SetState(cmd, target)
+			if target then -- turning a script OFF doesn't count as running one
+				SessionStats.Scripts += 1
+				SessionStats.Last = cmd.Name
+			end
 			Log("success", cmd.Name .. (target and " enabled" or " disabled"))
 			Record(cmd.Name .. (target and "  ON" or "  OFF"), true)
 			Notify(cmd.Name, target and "Enabled" or "Disabled", target and "success" or "info")
@@ -723,6 +734,8 @@ local function Execute(cmd)
 	else
 		local ok, err = pcall(cmd.Func, cmd, cmd.Values)
 		if ok then
+			SessionStats.Scripts += 1
+			SessionStats.Last = cmd.Name
 			Log("success", cmd.Name .. " executed")
 			Record(cmd.Name .. "  run", true)
 			if not cmd.Silent then
@@ -2429,6 +2442,651 @@ end)
 	})
 end
 
+--==================================================================================--
+--  v1.5 COMMANDS: Fling, TPWalk, Custom Crosshair, Bunny Hop, Time Of Day,
+--  Head Sit, Anti-Void
+--==================================================================================--
+
+-- ---------------------------------------------------------------- FLING
+do
+	local conn, saved, session = nil, nil, 0
+	local function release(restore)
+		session += 1
+		if conn then conn:Disconnect() conn = nil end
+		local cf = saved
+		saved = nil
+		local r = Root()
+		if not r then return end
+		r.AssemblyLinearVelocity = Vector3.zero
+		r.AssemblyAngularVelocity = Vector3.zero
+		if restore and cf then
+			r.CFrame = cf
+			local id = session
+			task.spawn(function() -- hold still for a few frames so the spin can't carry you off
+				for _ = 1, 12 do
+					RunService.Heartbeat:Wait()
+					local rr = Root()
+					if session ~= id or not rr then return end
+					rr.AssemblyLinearVelocity = Vector3.zero
+					rr.AssemblyAngularVelocity = Vector3.zero
+					rr.CFrame = cf
+				end
+			end)
+		end
+	end
+	AddCommand({
+		Name = "Fling", Desc = "Spins into a player at high speed to launch them, then puts you back where you were.", Kind = "Run", Silent = true,
+		Aliases = { "yeet" },
+		Inputs = {
+			{ Key = "Target", Label = "Player", Type = "player" },
+			{ Key = "Power", Label = "Power", Type = "number", Default = 500000, Min = 1000, Max = 100000000 },
+			{ Key = "Duration", Label = "Max seconds", Type = "number", Default = 3, Min = .5, Max = 15 },
+		},
+		Func = function(self, v)
+			local target = FindPlayer(v.Target)
+			assert(target and target ~= LP, "Select another player first")
+			local r = Root()
+			assert(r, "Character not found")
+			release(false)
+			saved = r.CFrame
+			local id, started = session, os.clock()
+			SetState(self, true)
+			Notify("Fling", "Flinging " .. target.Name, "info")
+			conn = RunService.Heartbeat:Connect(function()
+				if session ~= id then return end
+				local root = Root()
+				local tr = target.Parent and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+				local elapsed = os.clock() - started
+				local reason
+				if not root then reason = "Your character is gone"
+				elseif not tr then reason = target.Name .. " is gone"
+				elseif elapsed > .3 and tr.AssemblyLinearVelocity.Magnitude > 250 then reason = target.Name .. " was flung"
+				elseif elapsed >= v.Duration then reason = "Timed out"
+				end
+				if reason then
+					release(true)
+					SetState(self, false)
+					Notify("Fling", reason, "info")
+					return
+				end
+				local p = tr.Position + tr.AssemblyLinearVelocity * .12 + Vector3.new(0, math.random(-5, 5) / 10, 0)
+				root.CFrame = CFrame.new(p)
+				root.AssemblyLinearVelocity = Vector3.new(v.Power, v.Power, v.Power)
+				root.AssemblyAngularVelocity = Vector3.new(v.Power, v.Power, v.Power)
+			end)
+		end,
+		Stop = function() release(true) end,
+		Cleanup = function() release(false) end,
+		Source = [==[
+-- Fling
+local target = Players:FindFirstChild("PlayerName")
+local root = player.Character.HumanoidRootPart
+local home = root.CFrame
+local power = 500000
+local started = os.clock()
+
+local conn
+conn = RunService.Heartbeat:Connect(function()
+    local tr = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+    if not tr or tr.AssemblyLinearVelocity.Magnitude > 250 or os.clock() - started > 3 then
+        conn:Disconnect()
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        root.CFrame = home
+        return
+    end
+    root.CFrame = CFrame.new(tr.Position + tr.AssemblyLinearVelocity * 0.12)
+    root.AssemblyLinearVelocity = Vector3.new(power, power, power)
+    root.AssemblyAngularVelocity = Vector3.new(power, power, power)
+end)
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- TPWALK
+do
+	local conn
+	local function stop()
+		if conn then conn:Disconnect() conn = nil end
+	end
+	AddCommand({
+		Name = "TPWalk", Desc = "Moves you faster by nudging your position as you walk. Not affected by WalkSpeed checks.", Kind = "Toggle",
+		Aliases = { "tpw" },
+		Inputs = { { Key = "Speed", Label = "Extra studs / sec", Type = "number", Default = 40, Min = 1, Max = 1000 } },
+		Func = function(self, v, state)
+			stop()
+			if not state then return end
+			conn = RunService.Heartbeat:Connect(function(dt)
+				local c, h = LP.Character, Hum()
+				if c and h and h.Health > 0 and not h.Sit and h.MoveDirection.Magnitude > 0 then
+					c:TranslateBy(h.MoveDirection * v.Speed * dt)
+				end
+			end)
+		end,
+		Cleanup = stop,
+		Source = [==[
+-- TPWalk (toggle)
+local speed = 40 -- extra studs per second
+
+local conn = RunService.Heartbeat:Connect(function(dt)
+    local char = player.Character
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    if humanoid and humanoid.MoveDirection.Magnitude > 0 then
+        char:TranslateBy(humanoid.MoveDirection * speed * dt)
+    end
+end)
+
+-- To disable: conn:Disconnect()
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- CUSTOM CROSSHAIR
+do
+	local conn, holder, oldIcon
+	local function destroy()
+		if conn then conn:Disconnect() conn = nil end
+		if holder then holder:Destroy() holder = nil end
+		if oldIcon ~= nil then
+			UserInputService.MouseIconEnabled = oldIcon
+			oldIcon = nil
+		end
+	end
+	AddCommand({
+		Name = "Custom Crosshair", Desc = "Draws your own crosshair: color, size, gap, dot, outline. Can follow the mouse.", Kind = "Toggle",
+		Aliases = { "crosshair", "xhair" },
+		Inputs = {
+			{ Key = "Color", Label = "Color", Type = "color", Default = C(0, 255, 120) },
+			{ Key = "Length", Label = "Line length", Type = "number", Default = 10, Min = 1, Max = 100 },
+			{ Key = "Thickness", Label = "Thickness", Type = "number", Default = 2, Min = 1, Max = 12 },
+			{ Key = "Gap", Label = "Center gap", Type = "number", Default = 5, Min = 0, Max = 60 },
+			{ Key = "Dot", Label = "Center dot", Type = "bool", Default = false },
+			{ Key = "Outline", Label = "Black outline", Type = "bool", Default = true },
+			{ Key = "FollowMouse", Label = "Follow the mouse", Type = "bool", Default = false },
+			{ Key = "HideCursor", Label = "Hide system cursor", Type = "bool", Default = true },
+		},
+		Func = function(self, v, state)
+			destroy()
+			if not state then return end
+			holder = Instance.new("Frame")
+			holder.Name = "MantleCrosshair"
+			holder.AnchorPoint = Vector2.new(.5, .5)
+			holder.Size = UDim2.fromOffset(0, 0)
+			holder.BackgroundTransparency = 1
+			holder.ZIndex = 90
+			holder.Parent = Gui
+			local parts = {}
+			for _, n in ipairs({ "Top", "Bottom", "Left", "Right", "Dot" }) do
+				local f = Instance.new("Frame")
+				f.Name = n
+				f.BorderSizePixel = 0
+				f.ZIndex = 90
+				f.Parent = holder
+				local s = Instance.new("UIStroke")
+				s.Thickness = 1
+				s.Color = Color3.new(0, 0, 0)
+				s.Parent = f
+				parts[n] = { Frame = f, Stroke = s }
+			end
+			conn = RunService.RenderStepped:Connect(function()
+				local L, T, G = v.Length, v.Thickness, v.Gap
+				local layout = {
+					Top = { Vector2.new(-T / 2, -(G + L)), Vector2.new(T, L) },
+					Bottom = { Vector2.new(-T / 2, G), Vector2.new(T, L) },
+					Left = { Vector2.new(-(G + L), -T / 2), Vector2.new(L, T) },
+					Right = { Vector2.new(G, -T / 2), Vector2.new(L, T) },
+					Dot = { Vector2.new(-T / 2, -T / 2), Vector2.new(T, T) },
+				}
+				for n, p in pairs(parts) do
+					local pos, size = layout[n][1], layout[n][2]
+					p.Frame.Position = UDim2.fromOffset(pos.X, pos.Y)
+					p.Frame.Size = UDim2.fromOffset(size.X, size.Y)
+					p.Frame.BackgroundColor3 = v.Color
+					p.Frame.Visible = n ~= "Dot" or v.Dot
+					p.Stroke.Enabled = v.Outline
+				end
+				if v.FollowMouse then
+					local m = UserInputService:GetMouseLocation()
+					holder.Position = UDim2.fromOffset(m.X, m.Y)
+				else
+					holder.Position = UDim2.fromScale(.5, .5)
+				end
+				holder.Visible = not IsUIOpen() -- the real cursor takes over while the Mantle window is open
+				if v.HideCursor and not IsUIOpen() then
+					if oldIcon == nil then oldIcon = UserInputService.MouseIconEnabled end
+					UserInputService.MouseIconEnabled = false
+				elseif oldIcon ~= nil then
+					UserInputService.MouseIconEnabled = oldIcon
+					oldIcon = nil
+				end
+			end)
+		end,
+		Cleanup = destroy,
+		Source = [==[
+-- Custom Crosshair (toggle)
+local color, length, thickness, gap = Color3.fromRGB(0, 255, 120), 10, 2, 5
+
+local gui = Instance.new("ScreenGui")
+gui.IgnoreGuiInset = true
+gui.ResetOnSpawn = false
+gui.Parent = player.PlayerGui
+
+local function line(x, y, w, h)
+    local f = Instance.new("Frame")
+    f.AnchorPoint = Vector2.new(.5, .5)
+    f.Position = UDim2.new(.5, x, .5, y)
+    f.Size = UDim2.fromOffset(w, h)
+    f.BackgroundColor3 = color
+    f.BorderSizePixel = 0
+    f.Parent = gui
+    Instance.new("UIStroke", f).Thickness = 1
+end
+
+local o = gap + length / 2
+line(0, -o, thickness, length)  -- top
+line(0,  o, thickness, length)  -- bottom
+line(-o, 0, length, thickness)  -- left
+line( o, 0, length, thickness)  -- right
+
+UserInputService.MouseIconEnabled = false
+-- To remove: gui:Destroy() and MouseIconEnabled = true
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- OWNER TAG
+-- A gold "Owner" tag over the owner's head. It's drawn locally, so only people running Mantle
+-- see it. There's no command for it: it just appears whenever OWNER_USERNAME is in the server.
+do
+	local OWNER_COLOR = C(255, 196, 52)
+	local folder = Instance.new("Folder")
+	folder.Name = "MantleOwnerTag"
+	folder.Parent = Gui
+	local guis = {}
+
+	local function build(head)
+		local g = Instance.new("BillboardGui")
+		g.Name = "OwnerTag"
+		g.Adornee = head
+		g.Size = UDim2.fromOffset(200, 22)
+		g.StudsOffsetWorldSpace = Vector3.new(0, 3.2, 0)
+		g.MaxDistance = 200
+		g.ResetOnSpawn = false
+		g.Parent = folder
+		local l = Instance.new("TextLabel")
+		l.BackgroundTransparency = 1
+		l.Size = UDim2.fromScale(1, 1)
+		l.Font = Enum.Font.GothamBold
+		l.TextSize = 16
+		l.RichText = false
+		l.TextStrokeTransparency = .35
+		l.TextColor3 = OWNER_COLOR
+		l.Text = "Owner"
+		l.Parent = g
+		return g
+	end
+
+	local function render()
+		for _, p in ipairs(Players:GetPlayers()) do
+			local isOwner = p.Name:lower() == OWNER_USERNAME:lower()
+			local head = isOwner and p.Character and p.Character:FindFirstChild("Head")
+			local g = guis[p]
+			if head then
+				if not g or g.Adornee ~= head then
+					if g then g:Destroy() end
+					guis[p] = build(head)
+				end
+			elseif g then
+				g:Destroy()
+				guis[p] = nil
+			end
+		end
+		for p, g in pairs(guis) do
+			if not p.Parent then
+				g:Destroy()
+				guis[p] = nil
+			end
+		end
+	end
+
+	-- the loop ends on its own once Mantle is terminated (the folder goes with the Gui)
+	task.spawn(function()
+		while folder.Parent do
+			pcall(render)
+			task.wait(.5)
+		end
+	end)
+end
+
+-- ---------------------------------------------------------------- BUNNY HOP
+do
+	local conns = {}
+	local function stop()
+		for _, c in ipairs(conns) do c:Disconnect() end
+		table.clear(conns)
+	end
+	-- Jumps the moment the humanoid is on the ground. It looks the humanoid up every frame, so it
+	-- keeps going through respawns and only ends when the command is toggled off.
+	local function hop()
+		local h = Hum()
+		if not h or h.Health <= 0 or h.Sit or h.PlatformStand then return end
+		local st = h:GetState()
+		if st == Enum.HumanoidStateType.Jumping or st == Enum.HumanoidStateType.Freefall
+			or st == Enum.HumanoidStateType.Swimming or st == Enum.HumanoidStateType.Climbing
+			or st == Enum.HumanoidStateType.Dead or st == Enum.HumanoidStateType.Seated then
+			return
+		end
+		if h.FloorMaterial ~= Enum.Material.Air then
+			h.Jump = true -- the normal jump path
+			h:ChangeState(Enum.HumanoidStateType.Jumping) -- forced, in case the game's controls reset Jump
+		end
+	end
+	AddCommand({
+		Name = "Bunny Hop", Desc = "Automatically jumps the moment you land. Runs until you toggle it off.", Kind = "Toggle", Aliases = { "bhop" },
+		Func = function(self, v, state)
+			stop()
+			if not state then return end
+			-- RenderStepped runs after the default controls reset Jump each frame; Heartbeat is a backup.
+			table.insert(conns, RunService.RenderStepped:Connect(hop))
+			table.insert(conns, RunService.Heartbeat:Connect(hop))
+		end,
+		Cleanup = stop,
+		Source = [==[
+-- Bunny Hop (toggle): jumps automatically every time you touch the ground
+local function hop()
+    local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 or humanoid.Sit or humanoid.PlatformStand then return end
+
+    local state = humanoid:GetState()
+    if state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
+        or state == Enum.HumanoidStateType.Swimming or state == Enum.HumanoidStateType.Climbing
+        or state == Enum.HumanoidStateType.Dead or state == Enum.HumanoidStateType.Seated then
+        return
+    end
+
+    if humanoid.FloorMaterial ~= Enum.Material.Air then
+        humanoid.Jump = true
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end
+
+local c1 = RunService.RenderStepped:Connect(hop)
+local c2 = RunService.Heartbeat:Connect(hop)
+
+-- To disable: c1:Disconnect() and c2:Disconnect()
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- FLOAT
+do
+	local conn, bv
+	local function stop()
+		if conn then conn:Disconnect() conn = nil end
+		if bv then bv:Destroy() bv = nil end
+	end
+	AddCommand({
+		Name = "Float", Desc = "Hover in place. Q to rise, E to lower. You can still walk around.", Kind = "Toggle", Aliases = { "hover" },
+		Inputs = { { Key = "Speed", Label = "Rise / lower speed", Type = "number", Default = 30, Min = 1, Max = 500 } },
+		Func = function(self, v, state)
+			stop()
+			if not state then return end
+			assert(Root(), "Character not found")
+			conn = RunService.Heartbeat:Connect(function()
+				local r, h = Root(), Hum()
+				if not (r and h) then return end -- between respawns: keep waiting
+				-- the part is replaced on respawn, so re-create the mover whenever it's missing
+				if not bv or bv.Parent ~= r then
+					if bv then bv:Destroy() end
+					bv = Instance.new("BodyVelocity")
+					bv.Name = "MantleFloat"
+					bv.MaxForce = Vector3.new(0, 1e9, 0) -- vertical only: walking still works
+					bv.Velocity = Vector3.zero
+					bv.Parent = r
+				end
+				local vy = 0
+				if not UserInputService:GetFocusedTextBox() then
+					if UserInputService:IsKeyDown(Enum.KeyCode.Q) then vy += v.Speed end
+					if UserInputService:IsKeyDown(Enum.KeyCode.E) then vy -= v.Speed end
+				end
+				bv.Velocity = Vector3.new(0, vy, 0)
+			end)
+		end,
+		Cleanup = stop,
+		Source = [==[
+-- Float (toggle): hover in place. Q rises, E lowers.
+local speed = 30
+local bv
+
+local conn = RunService.Heartbeat:Connect(function()
+    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    if not bv or bv.Parent ~= root then
+        bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(0, 1e9, 0) -- vertical only, so you can still walk
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
+    end
+
+    local vy = 0
+    if not UserInputService:GetFocusedTextBox() then
+        if UserInputService:IsKeyDown(Enum.KeyCode.Q) then vy += speed end
+        if UserInputService:IsKeyDown(Enum.KeyCode.E) then vy -= speed end
+    end
+    bv.Velocity = Vector3.new(0, vy, 0)
+end)
+
+-- To disable: conn:Disconnect() and bv:Destroy()
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- SWIM
+do
+	local conn, savedGravity
+	local function stop()
+		if conn then conn:Disconnect() conn = nil end
+		if savedGravity then
+			workspace.Gravity = savedGravity
+			savedGravity = nil
+		end
+		local h = Hum()
+		if h then
+			h:SetStateEnabled(Enum.HumanoidStateType.Swimming, false)
+			h:ChangeState(Enum.HumanoidStateType.Freefall)
+		end
+	end
+	AddCommand({
+		Name = "Swim", Desc = "Swim through the air like it's water. Look where you want to go and walk.", Kind = "Toggle", Aliases = { "airswim", "swimair" },
+		Func = function(self, v, state)
+			stop()
+			if not state then return end
+			assert(Hum(), "Humanoid not found")
+			savedGravity = workspace.Gravity
+			conn = RunService.Heartbeat:Connect(function()
+				workspace.Gravity = 0 -- stops you sinking; restored when you turn Swim off
+				local h = Hum()
+				if not h or h.Health <= 0 then return end
+				if not h:GetStateEnabled(Enum.HumanoidStateType.Swimming) then
+					h:SetStateEnabled(Enum.HumanoidStateType.Swimming, true)
+				end
+				if h:GetState() ~= Enum.HumanoidStateType.Swimming then
+					h:ChangeState(Enum.HumanoidStateType.Swimming)
+				end
+			end)
+		end,
+		Cleanup = stop,
+		Source = [==[
+-- Swim (toggle): swim through the air
+local originalGravity = workspace.Gravity
+
+local conn = RunService.Heartbeat:Connect(function()
+    workspace.Gravity = 0
+    local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return end
+
+    humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming, true)
+    if humanoid:GetState() ~= Enum.HumanoidStateType.Swimming then
+        humanoid:ChangeState(Enum.HumanoidStateType.Swimming)
+    end
+end)
+
+-- To disable: conn:Disconnect(), workspace.Gravity = originalGravity,
+-- then humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- TIME OF DAY
+do
+	local conn, orig
+	local function stop()
+		if conn then conn:Disconnect() conn = nil end
+		if orig ~= nil then
+			Lighting.ClockTime = orig
+			orig = nil
+		end
+	end
+	AddCommand({
+		Name = "Time Of Day", Desc = "Locks the in-game clock to an hour (0-24). Stop restores it.", Kind = "Run", Silent = true,
+		Aliases = { "time", "clocktime" },
+		Inputs = { { Key = "Hour", Label = "Hour (0-24)", Type = "number", Default = 12, Min = 0, Max = 24 } },
+		Func = function(self, v)
+			if orig == nil then orig = Lighting.ClockTime end
+			if conn then conn:Disconnect() end
+			conn = RunService.Heartbeat:Connect(function()
+				Lighting.ClockTime = v.Hour
+			end)
+			SetState(self, true)
+			Notify("Time Of Day", "Locked to hour " .. tostring(v.Hour), "success")
+		end,
+		Stop = stop,
+		Cleanup = stop,
+		Source = [==[
+-- Time Of Day
+local original = Lighting.ClockTime
+local conn = RunService.Heartbeat:Connect(function()
+    Lighting.ClockTime = 12
+end)
+
+-- To restore: conn:Disconnect() and Lighting.ClockTime = original
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- HEAD SIT
+do
+	local conn
+	local function stop()
+		if conn then conn:Disconnect() conn = nil end
+		local h = Hum()
+		if h then h.Sit = false end
+	end
+	AddCommand({
+		Name = "Head Sit", Desc = "Sit on a player's head and ride along. Press Space or Stop to get off.", Kind = "Run", Silent = true,
+		Aliases = { "headsit", "hs" },
+		Inputs = { { Key = "Target", Label = "Player", Type = "player" } },
+		Func = function(self, v)
+			local target = FindPlayer(v.Target)
+			assert(target and target ~= LP, "Select another player first")
+			assert(Root() and Hum(), "Character not found")
+			stop()
+			SetState(self, true)
+			Notify("Head Sit", "Riding " .. target.Name, "info")
+			conn = RunService.Heartbeat:Connect(function()
+				local r, h = Root(), Hum()
+				local head = target.Parent and target.Character and target.Character:FindFirstChild("Head")
+				if not (r and h and head) or (UserInputService:IsKeyDown(Enum.KeyCode.Space) and not UserInputService:GetFocusedTextBox()) then
+					stop()
+					SetState(self, false)
+					Notify("Head Sit", "Stopped", "info")
+					return
+				end
+				h.Sit = true
+				r.CFrame = head.CFrame * CFrame.new(0, 1.6, 0)
+				r.AssemblyLinearVelocity = Vector3.zero
+			end)
+		end,
+		Stop = stop,
+		Cleanup = stop,
+		Source = [==[
+-- Head Sit
+local target = Players:FindFirstChild("PlayerName")
+local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+local root = player.Character.HumanoidRootPart
+
+local conn = RunService.Heartbeat:Connect(function()
+    local head = target.Character and target.Character:FindFirstChild("Head")
+    if not head then return end
+    humanoid.Sit = true
+    root.CFrame = head.CFrame * CFrame.new(0, 1.6, 0)
+    root.AssemblyLinearVelocity = Vector3.zero
+end)
+
+-- To stop: conn:Disconnect() and humanoid.Sit = false
+]==],
+	})
+end
+
+-- ---------------------------------------------------------------- ANTI-VOID
+do
+	local conn
+	local function stop()
+		if conn then conn:Disconnect() conn = nil end
+	end
+	AddCommand({
+		Name = "Anti-Void", Desc = "Remembers where you last stood and puts you back if you fall toward the void.", Kind = "Toggle",
+		Aliases = { "antivoid", "av" },
+		Inputs = { { Key = "Margin", Label = "Rescue margin (studs)", Type = "number", Default = 60, Min = 10, Max = 500 } },
+		Func = function(self, v, state)
+			stop()
+			if not state then return end
+			local safe, lastNote = nil, 0
+			conn = RunService.Heartbeat:Connect(function()
+				local r, h = Root(), Hum()
+				if not (r and h) then
+					safe = nil
+					return
+				end
+				local limit = workspace.FallenPartsDestroyHeight + v.Margin
+				if h.FloorMaterial ~= Enum.Material.Air and r.Position.Y > limit + 20 then
+					safe = r.CFrame + Vector3.new(0, 3, 0)
+				elseif r.Position.Y < limit and safe then
+					r.AssemblyLinearVelocity = Vector3.zero
+					r.CFrame = safe
+					if os.clock() - lastNote > 2 then
+						lastNote = os.clock()
+						Notify("Anti-Void", "Pulled you back from the void", "success")
+					end
+				end
+			end)
+		end,
+		Cleanup = stop,
+		Source = [==[
+-- Anti-Void (toggle)
+local margin = 60
+local safe
+
+local conn = RunService.Heartbeat:Connect(function()
+    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if not (root and humanoid) then safe = nil return end
+
+    local limit = workspace.FallenPartsDestroyHeight + margin
+    if humanoid.FloorMaterial ~= Enum.Material.Air and root.Position.Y > limit + 20 then
+        safe = root.CFrame + Vector3.new(0, 3, 0)
+    elseif root.Position.Y < limit and safe then
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = safe
+    end
+end)
+
+-- To disable: conn:Disconnect()
+]==],
+	})
+end
+
 local SetWidgetPinned, SetWidgetEnabled -- assigned once the widget system exists
 
 local function RunCommandLine(text)
@@ -2468,6 +3126,8 @@ local function RunCommandLine(text)
 		end
 		local ok2, e2 = pcall(f)
 		if ok2 then
+			SessionStats.Scripts += 1
+			SessionStats.Last = "Custom Lua"
 			Notify("Custom command", "Executed", "success")
 		else
 			Log("error", tostring(e2))
@@ -2495,7 +3155,16 @@ local function RunCommandLine(text)
 
 	local idx = 0
 	for _, inp in ipairs(cmd.Inputs or {}) do
-		if inp.Type == "number" or inp.Type == "player" then
+		if inp.Type == "text" then
+			local words = {}
+			for i = idx + 1, #clean do table.insert(words, clean[i]) end
+			if #words > 0 then
+				local val = table.concat(words, " ")
+				cmd.Values[inp.Key] = val
+				if cmd.Setters[inp.Key] then cmd.Setters[inp.Key](val) end
+			end
+			idx = #clean
+		elseif inp.Type == "number" or inp.Type == "player" then
 			idx += 1
 			local a = clean[idx]
 			if a then
@@ -2553,7 +3222,9 @@ end)
 --==================================================================================--
 --  WINDOW (Game Bar layout: top bar + floating panel + widgets)
 --==================================================================================--
-local UI = {}
+-- Loosely typed on purpose: UI.* hooks are attached later from other scopes, and a strict type
+-- checker would otherwise reject every one of them ("Key 'X' not found in table 'UI'").
+local UI: { [string]: any } = {}
 local UIOpen = false
 IsUIOpen = function() return UIOpen end
 local SetOpen, OpenCmd -- forward declarations
@@ -2660,7 +3331,7 @@ local function NewPage(name)
 	return sf
 end
 
-local TabNameList = { "Home", "Commands", "Players", "Settings", "Credits" }
+local TabNameList = { "Home", "Commands", "Players", "Misc", "Settings", "Credits" }
 local function IsDocked(name)
 	local w = Config.Widgets[name]
 	return not (w and w.Enabled)
@@ -2722,6 +3393,7 @@ end
 AddTab("Home")
 AddTab("Commands")
 AddTab("Players")
+AddTab("Misc")
 AddTab("Settings")
 AddTab("Credits")
 
@@ -2776,7 +3448,7 @@ end)
 --  WIDGETS  (Performance, Keybinds, and any tab turned into a widget)
 --==================================================================================--
 local Widgets = {}
-local WidgetOrder = { "Performance", "Keybinds", "Home", "Commands", "Players", "Credits", "Command Bar", "Command History", "Command List" }
+local WidgetOrder = { "Performance", "Keybinds", "Home", "Commands", "Players", "Misc", "Credits", "Command Bar", "Command History", "Command List" }
 local RefreshWidget
 
 local function VP()
@@ -2923,7 +3595,7 @@ local function MakeWidget(name, w, h, isTab)
 	Label(head, name, 14, F.Bold, "Text", {
 		Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -130, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd,
 	})
-	local rec = { Frame = f, Scale = scale, Token = 0, Name = name }
+	local rec: { [string]: any } = { Frame = f, Scale = scale, Token = 0, Name = name }
 	local closeBtn = MakeButton(head, isTab and "Dock" or "Hide", {
 		Size = UDim2.fromOffset(46, 22), TextSize = 11,
 		OnClick = function() SetWidgetEnabled(name, false) end,
@@ -3223,7 +3895,7 @@ local function Suggest(text)
 	if cmd and text:find("^%s*%S+%s") then
 		local parts = {}
 		for _, inp in ipairs(cmd.Inputs or {}) do
-			if inp.Type == "number" or inp.Type == "player" then
+			if inp.Type == "number" or inp.Type == "player" or inp.Type == "text" then
 				table.insert(parts, "<" .. inp.Label:lower() .. ">")
 			end
 		end
@@ -3475,55 +4147,6 @@ end
 --==================================================================================--
 --  HOME TAB
 --==================================================================================--
-local Updates = {
-	{
-		Version = "1.4.0", Title = "Music, backgrounds & movement",
-		Notes = {
-			"New Music Player in Settings: play / pause / stop, loop, seek, volume, speed and a saved playlist (Roblox audio IDs)",
-			"New background image selector in Settings > Appearance (Roblox image or decal ID)",
-			"New Catppuccin Mocha theme",
-			"New commands: Spin and Anti-Fling",
-		},
-	},
-	{
-		Version = "1.3.0", Title = "Widgets & camera tools",
-		Notes = {
-			"The , command bar is now a Command Bar widget (Up / Down recalls earlier commands)",
-			"New Command History and Command List widgets",
-			"New commands: Max Zoom, Third Person, First Person, Force Shiftlock, Sit, XRAY, No Shadows, Hitbox Shower",
-			"ESP now has a Tracers toggle",
-		},
-	},
-	{
-		Version = "1.2.0", Title = "Widgets & keybinds",
-		Notes = {
-			"Mantle no longer opens by itself: use your keybind or the mobile button",
-			"Right-click any command to set a keybind (toggles too); new Keybinds widget",
-			"Tabs can be turned into pinnable widgets from Settings",
-			"New Freecam command; Spectate in the Players tab now cancels when pressed again",
-			"Smoother animations, flight and dragging; more accurate FPS and ping; Onyx is the new default theme",
-		},
-	},
-	{
-		Version = "1.1.0", Title = "Game Bar edition",
-		Notes = {
-			"New Xbox Game Bar style layout: top bar, floating panel, dimmed backdrop",
-			"Press , anywhere to open a one-shot command bar (with live suggestions)",
-			"Pinnable Performance widget: FPS, Ping, Memory and player count with graphs",
-			"New commands: Infinite Jump, Spectate, FOV, Gravity, FPS Cap",
-			"Game Info card, clock and session timer",
-		},
-	},
-	{
-		Version = "1.0.0", Title = "Initial release",
-		Notes = {
-			"Run / Toggle commands with Inspect",
-			"Themes, adjustable opacity and a rebindable toggle key",
-			"Player list, live console, config saving and quick actions",
-		},
-	},
-}
-
 do
 	local Home = NewPage("Home")
 	Label(Home, "Welcome, " .. LP.Name, 22, F.Bold, "Text", { Size = UDim2.new(1, 0, 0, 28), LayoutOrder = 1 })
@@ -3549,41 +4172,72 @@ do
 
 	-- Game info
 	local gi = Card(Home, "Game Info", 4)
-	local function infoRow(k)
-		local r = Frame(gi, UDim2.new(1, 0, 0, 18), nil)
+	local gHead = Frame(gi, UDim2.new(1, 0, 0, 64), nil)
+	local gIcon = New("ImageLabel", {
+		Parent = gHead, Size = UDim2.fromOffset(64, 64), BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop,
+		Image = game.GameId ~= 0 and ("rbxthumb://type=GameIcon&id=" .. game.GameId .. "&w=150&h=150") or "",
+	})
+	Style(gIcon, { BackgroundColor3 = "Surface2" })
+	Corner(gIcon, 10)
+	Stroke(gIcon)
+	local gName = Label(gHead, game.Name ~= "" and game.Name or "Unknown game", 16, F.Bold, "Text", {
+		Position = UDim2.fromOffset(76, 8), Size = UDim2.new(1, -76, 0, 24), TextTruncate = Enum.TextTruncate.AtEnd,
+	})
+	local gBy = Label(gHead, "", 12, F.Reg, "Sub", {
+		Position = UDim2.fromOffset(76, 34), Size = UDim2.new(1, -76, 0, 16), TextTruncate = Enum.TextTruncate.AtEnd,
+	})
+	task.spawn(function() -- the real place name (and creator) come from the marketplace
+		local ok, info = pcall(function()
+			return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId)
+		end)
+		if ok and type(info) == "table" then
+			if gName.Parent and type(info.Name) == "string" and info.Name ~= "" then gName.Text = info.Name end
+			if gBy.Parent and type(info.Creator) == "table" and info.Creator.Name then gBy.Text = "by " .. tostring(info.Creator.Name) end
+		end
+	end)
+
+	local function infoRow(parent, k)
+		local r = Frame(parent, UDim2.new(1, 0, 0, 18), nil)
 		Label(r, k, 12, F.Reg, "Sub", { Size = UDim2.new(.35, 0, 1, 0) })
 		return Label(r, "", 12, F.Med, "Text", {
 			Position = UDim2.fromScale(.35, 0), Size = UDim2.fromScale(.65, 1), TextTruncate = Enum.TextTruncate.AtEnd,
 		})
 	end
-	local iPlace, iJob = infoRow("Place ID"), infoRow("Job ID")
-	local iPlayers, iUp, iSes = infoRow("Players"), infoRow("Server uptime"), infoRow("Mantle session")
+	local iPlace, iJob = infoRow(gi, "Place ID"), infoRow(gi, "Job ID")
+	local iPlayers, iUp = infoRow(gi, "Players"), infoRow(gi, "Server uptime")
 	iPlace.Text = tostring(game.PlaceId)
 	iJob.Text = game.JobId ~= "" and game.JobId or "Studio"
 	local gb = Frame(gi, UDim2.new(1, 0, 0, 30), nil)
 	List(gb, 8, Enum.FillDirection.Horizontal)
 	MakeButton(gb, "Copy Place ID", { AutoX = true, Height = 28, TextSize = 12, OnClick = function() CopyText(tostring(game.PlaceId), "Place ID") end })
 	MakeButton(gb, "Copy Job ID", { AutoX = true, Height = 28, TextSize = 12, OnClick = function() CopyText(game.JobId, "Job ID") end })
+
+	-- General info
+	local ge = Card(Home, "General Info", 5)
+	local gScripts, gOpen = infoRow(ge, "Scripts ran"), infoRow(ge, "Mantle open for")
+	local gLast, gActive = infoRow(ge, "Last script"), infoRow(ge, "Active toggles")
+	local gCmds, gBinds = infoRow(ge, "Commands loaded"), infoRow(ge, "Keybinds set")
+	local gTheme, gTime = infoRow(ge, "Theme"), infoRow(ge, "Local time")
+
 	function UI.InfoUpdate()
 		iPlayers.Text = #Players:GetPlayers() .. " / " .. Players.MaxPlayers
 		iUp.Text = FmtTime(workspace.DistributedGameTime)
-		iSes.Text = FmtTime(os.clock() - StartClock)
+
+		gScripts.Text = tostring(SessionStats.Scripts)
+		gOpen.Text = FmtTime(os.clock() - StartClock)
+		gLast.Text = SessionStats.Last or "None yet"
+		local active, bound = 0, 0
+		for _, cmd in ipairs(Commands) do
+			if cmd.Kind == "Toggle" and cmd.Enabled then active += 1 end
+			if cmd.Key then bound += 1 end
+		end
+		gActive.Text = tostring(active)
+		gCmds.Text = tostring(#Commands)
+		gBinds.Text = tostring(bound)
+		gTheme.Text = Config.Theme
+		gTime.Text = (os.date("%I:%M %p"):gsub("^0", ""))
 	end
 	UI.InfoUpdate()
-
-	-- Updates
-	local upd = Card(Home, "What's New", 5)
-	for _, u in ipairs(Updates) do
-		local hd = Frame(upd, UDim2.new(1, 0, 0, 22), nil)
-		List(hd, 8, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center)
-		Pill(hd, "v" .. u.Version, true)
-		Label(hd, u.Title, 13, F.Med, "Text", { Size = UDim2.fromOffset(0, 22), AutomaticSize = Enum.AutomaticSize.X })
-		for _, n in ipairs(u.Notes) do
-			Label(upd, "•  " .. n, 12, F.Reg, "Sub", {
-				Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextWrapped = true,
-			})
-		end
-	end
 
 	-- Quick actions
 	local qa = Card(Home, "Quick Actions", 6)
@@ -3749,6 +4403,17 @@ do
 			cmd.Setters[k] = function(c)
 				setColor(c)
 				setHue((c:ToHSV()), true)
+			end
+
+		elseif inp.Type == "text" then
+			local _, tb = Field(holder, inp.Placeholder or "", UDim2.new(1, 0, 0, 30))
+			tb.Text = tostring(cmd.Values[k] or "")
+			tb.FocusLost:Connect(function()
+				cmd.Values[k] = tb.Text
+			end)
+			cmd.Setters[k] = function(v)
+				cmd.Values[k] = v
+				tb.Text = tostring(v)
 			end
 
 		elseif inp.Type == "player" then
@@ -4002,8 +4667,8 @@ end)
 --==================================================================================--
 --  SETTINGS TAB
 --==================================================================================--
--- Music engine (the controls live in Settings > Music Player) ---------------------------
-local Music = {
+-- Music engine (the controls live in Misc > Music Player) ---------------------------
+local Music: { [string]: any } = {
 	Sound = FEATURES.Music and New("Sound", { Name = "MantleMusic", Volume = .5, Parent = game:GetService("SoundService") }) or nil,
 	Playlist = {}, Index = nil, CurrentId = nil, LastId = nil, CurrentName = nil, Loading = false,
 	Token = 0, LastManual = 0, Listeners = {},
@@ -4348,6 +5013,7 @@ do
 	WidgetRow("Home", "Show the Home tab as a widget", "Widget")
 	WidgetRow("Commands", "Show the Commands tab as a widget", "Widget")
 	WidgetRow("Players", "Show the Players tab as a widget", "Widget")
+	WidgetRow("Misc", "Show the Misc tab as a widget", "Widget")
 	WidgetRow("Credits", "Show the Credits tab as a widget", "Widget")
 
 	-- Controls
@@ -4430,9 +5096,45 @@ do
 	MakeButton(cb, "Load", { OnClick = function() LoadConfig() end })
 	MakeButton(cb, "Reset", { OnClick = function() ResetConfig() end })
 
+
+	-- Advanced
+	local adv = Card(Page, "Advanced", 6)
+	local cr = SettingRow(adv, "Console", "Opens the Mantle console in its own window")
+	local consoleBtn = MakeButton(cr, "Open", { Size = UDim2.fromOffset(100, 30) })
+	consoleBtn.AnchorPoint = Vector2.new(1, .5)
+	consoleBtn.Position = UDim2.new(1, 0, .5, 0)
+	consoleBtn.MouseButton1Click:Connect(function()
+		ConsoleGui.Enabled = not ConsoleGui.Enabled
+		RenderConsole()
+	end)
+	local tr = SettingRow(adv, "Terminate UI", "Stops every command and removes Mantle completely")
+	local termBtn = MakeButton(tr, "Terminate", { Size = UDim2.fromOffset(100, 30), Variant = "Danger" })
+	termBtn.AnchorPoint = Vector2.new(1, .5)
+	termBtn.Position = UDim2.new(1, 0, .5, 0)
+	local armed = false
+	termBtn.MouseButton1Click:Connect(function()
+		if armed then
+			Terminate()
+			return
+		end
+		armed = true
+		termBtn.Text = "Confirm?"
+		task.delay(3, function()
+			armed = false
+			if termBtn.Parent then termBtn.Text = "Terminate" end
+		end)
+	end)
+end
+
+--==================================================================================--
+--  MISC TAB  (music player, Infinite Yield launcher)
+--==================================================================================--
+do
+	local Page = NewPage("Misc")
+
 	-- Music player
 	if FEATURES.Music then (function()
-	local mu = Card(Page, "Music Player", 6)
+	local mu = Card(Page, "Music Player", 1)
 	local function fmt(s)
 		s = math.max(0, math.floor(s))
 		return ("%d:%02d"):format(s // 60, s % 60)
@@ -4569,7 +5271,7 @@ do
 		acc += dt
 		if acc < .25 then return end
 		acc = 0
-		if not (UIOpen and CurrentTab == "Settings" and Music.CurrentId) then return end
+		if not (UIOpen and (CurrentTab == "Misc" or Config.Widgets.Misc.Enabled) and Music.CurrentId) then return end
 		local len, pos = MusicSound.TimeLength, MusicSound.TimePosition
 		timeLabel.Text = fmt(pos) .. " / " .. fmt(len)
 		if os.clock() - lastSeek > .6 then
@@ -4579,33 +5281,37 @@ do
 
 	end)() end -- FEATURES.Music
 
-	-- Advanced
-	local adv = Card(Page, "Advanced", 7)
-	local cr = SettingRow(adv, "Console", "Opens the Mantle console in its own window")
-	local consoleBtn = MakeButton(cr, "Open", { Size = UDim2.fromOffset(100, 30) })
-	consoleBtn.AnchorPoint = Vector2.new(1, .5)
-	consoleBtn.Position = UDim2.new(1, 0, .5, 0)
-	consoleBtn.MouseButton1Click:Connect(function()
-		ConsoleGui.Enabled = not ConsoleGui.Enabled
-		RenderConsole()
-	end)
-	local tr = SettingRow(adv, "Terminate UI", "Stops every command and removes Mantle completely")
-	local termBtn = MakeButton(tr, "Terminate", { Size = UDim2.fromOffset(100, 30), Variant = "Danger" })
-	termBtn.AnchorPoint = Vector2.new(1, .5)
-	termBtn.Position = UDim2.new(1, 0, .5, 0)
-	local armed = false
-	termBtn.MouseButton1Click:Connect(function()
-		if armed then
-			Terminate()
-			return
-		end
-		armed = true
-		termBtn.Text = "Confirm?"
-		task.delay(3, function()
-			armed = false
-			if termBtn.Parent then termBtn.Text = "Terminate" end
-		end)
-	end)
+	-- Infinite Yield
+	local iy = Card(Page, "Infinite Yield", 2)
+	Label(iy, "Loads the Infinite Yield admin script from ScriptBlox. It runs separately from Mantle and needs an executor with HTTP access.", 11, F.Reg, "Sub", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextWrapped = true,
+	})
+	local iyRow = Frame(iy, UDim2.new(1, 0, 0, 34), nil)
+	local launching = false
+	MakeButton(iyRow, "Launch Infinite Yield", {
+		Size = UDim2.fromOffset(170, 34), Variant = "Primary",
+		OnClick = function()
+			if launching then return end
+			launching = true
+			task.spawn(function()
+				local ok, err = pcall(function()
+					loadstring(game:HttpGet("https://scriptblox.com/raw/Universal-Script-Infinite-Yield-230564"))()
+				end)
+				launching = false
+				if ok then
+					SessionStats.Scripts += 1
+					SessionStats.Last = "Infinite Yield"
+					Log("success", "Infinite Yield launched")
+					Record("Infinite Yield  run", true)
+					Notify("Infinite Yield", "Launched", "success")
+				else
+					Log("error", "Infinite Yield: " .. tostring(err))
+					Record("Infinite Yield  failed: " .. tostring(err), false)
+					Notify("Infinite Yield", tostring(err), "error")
+				end
+			end)
+		end,
+	})
 end
 
 --==================================================================================--
@@ -4644,7 +5350,7 @@ do
 	local vp = VP()
 	local W = math.clamp(vp.X - 24, 300, 380)
 	local H = math.clamp(vp.Y - 120, 240, 380)
-	for _, name in ipairs({ "Home", "Commands", "Players", "Credits" }) do
+	for _, name in ipairs({ "Home", "Commands", "Players", "Misc", "Credits" }) do
 		MakeWidget(name, W, H, true)
 	end
 end
